@@ -1,0 +1,575 @@
+"""Import all modules"""
+from __future__ import print_function
+from six.moves import cPickle as pickle
+from six.moves import range
+from six.moves.urllib.request import urlretrieve
+from IPython.display import display, Image
+from scipy import ndimage
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import os
+import sys
+import tarfile
+import h5py
+
+"""Download the train,test and extra dataset """
+url = 'http://ufldl.stanford.edu/housenumbers/'
+
+def maybe_download(filename, force=False):
+  """Download a file if not present, and make sure it's the right size."""
+  if force or not os.path.exists(filename):
+    print('Attempting to download:', filename) 
+    filename, _ = urlretrieve(url + filename, filename)
+    print('\nDownload Complete!')
+  statinfo = os.stat(filename)
+  return filename
+
+train_filename = maybe_download('train.tar.gz')
+test_filename = maybe_download('test.tar.gz')
+"extra_filename = maybe_download('extra.tar.gz')"
+
+print("Success")
+
+"""Extract dataset files"""
+np.random.seed(133)
+
+def maybe_extract(filename, force=False):
+  root = os.path.splitext(os.path.splitext(filename)[0])[0]  # remove .tar.gz
+  if os.path.isdir(root) and not force:
+    # You may override by setting force=True.
+    print('%s already present - Skipping extraction of %s.' % (root, filename))
+  else:
+    print('Extracting data for %s. This may take a while. Please wait.' % root)
+    tar = tarfile.open(filename)
+    sys.stdout.flush()
+    tar.extractall()
+    tar.close()
+  data_folders = root
+  print(data_folders)
+  return data_folders
+  
+train_folders = maybe_extract(train_filename)
+test_folders = maybe_extract(test_filename)
+"extra_folders = maybe_extract(extra_filename)"
+
+"""Create a python dictionary for bounded box indormation"""
+# The DigitStructFile is just a wrapper around the h5py data.  It basically references 
+#    inf:              The input h5 matlab file
+#    digitStructName   The h5 ref to all the file names
+#    digitStructBbox   The h5 ref to all struc data
+class DigitStructFile:
+    def __init__(self, inf):
+        self.inf = h5py.File(inf, 'r')
+        self.digitStructName = self.inf['digitStruct']['name']
+        self.digitStructBbox = self.inf['digitStruct']['bbox']
+
+# getName returns the 'name' string for for the n(th) digitStruct. 
+    def getName(self,n):
+        return ''.join([chr(c[0]) for c in self.inf[self.digitStructName[n][0]].value])
+
+# bboxHelper handles the coding difference when there is exactly one bbox or an array of bbox. 
+    def bboxHelper(self,attr):
+        if (len(attr) > 1):
+            attr = [self.inf[attr.value[j].item()].value[0][0] for j in range(len(attr))]
+        else:
+            attr = [attr.value[0][0]]
+        return attr
+
+# getBbox returns a dict of data for the n(th) bbox. 
+    def getBbox(self,n):
+        bbox = {}
+        bb = self.digitStructBbox[n].item()
+        bbox['height'] = self.bboxHelper(self.inf[bb]["height"])
+        bbox['label'] = self.bboxHelper(self.inf[bb]["label"])
+        bbox['left'] = self.bboxHelper(self.inf[bb]["left"])
+        bbox['top'] = self.bboxHelper(self.inf[bb]["top"])
+        bbox['width'] = self.bboxHelper(self.inf[bb]["width"])
+        return bbox
+    
+    def getDigitStructure(self,n):
+        s = self.getBbox(n)
+        s['name']=self.getName(n)
+        return s
+
+# getAllDigitStructure returns all the digitStruct from the input file.     
+    def getAllDigitStructure(self):
+        return [self.getDigitStructure(i) for i in range(len(self.digitStructName))]
+
+# Return a restructured version of the dataset (one structure by boxed digit).
+#
+#   Return a list of such dicts :
+#      'filename' : filename of the samples
+#      'boxes' : list of such dicts (one by digit) :
+#          'label' : 1 to 9 corresponding digits. 10 for digit '0' in image.
+#          'left', 'top' : position of bounding box
+#          'width', 'height' : dimension of bounding box
+#
+# Note: We may turn this to a generator, if memory issues arise.
+    def getAllDigitStructure_ByDigit(self):
+        pictDat = self.getAllDigitStructure()
+        result = []
+        structCnt = 1
+        for i in range(len(pictDat)):
+            item = { 'filename' : pictDat[i]["name"] }
+            figures = []
+            for j in range(len(pictDat[i]['height'])):
+               figure = {}
+               figure['height'] = pictDat[i]['height'][j]
+               figure['label']  = pictDat[i]['label'][j]
+               figure['left']   = pictDat[i]['left'][j]
+               figure['top']    = pictDat[i]['top'][j]
+               figure['width']  = pictDat[i]['width'][j]
+               figures.append(figure)
+            structCnt = structCnt + 1
+            item['boxes'] = figures
+            result.append(item)
+        return result
+    
+print("Success")
+
+digitFileTrain=DigitStructFile(os.path.join('train','digitStruct.mat'))
+digitFileTest=DigitStructFile(os.path.join('test','digitStruct.mat'))
+"digitFileExtra=DigitStructFile(os.path.join('extra','digitStruct.mat'))"
+
+train_data=digitFileTrain.getAllDigitStructure_ByDigit()
+test_data=digitFileTest.getAllDigitStructure_ByDigit()
+"extra_data=digitFileExtra.getAllDigitStructure_ByDigit()"
+
+print("Success")
+
+"""Crop images using bounded box information"""
+from PIL import Image
+train_imsize = np.ndarray([len(train_data),2])
+for i in np.arange(len(train_data)):
+    filename = train_data[i]['filename']
+    fullname = os.path.join(train_folders, filename)
+    im = Image.open(fullname)
+    train_imsize[i, :] = im.size[:]
+    
+print(np.amax(train_imsize[:,0]), np.amax(train_imsize[:,1]))
+print(np.amin(train_imsize[:,0]), np.amin(train_imsize[:,1]))
+
+test_imsize = np.ndarray([len(test_data),2])
+for i in np.arange(len(test_data)):
+    filename = test_data[i]['filename']
+    fullname = os.path.join(test_folders, filename)
+    im = Image.open(fullname)
+    test_imsize[i, :] = im.size[:]
+
+print(np.amax(test_imsize[:,0]), np.amax(test_imsize[:,1]))
+print(np.amin(test_imsize[:,0]), np.amin(test_imsize[:,1]))
+
+print(np.where(train_imsize[:,0]==876))
+print(np.where(train_imsize[:,0]==25))
+print(np.where(test_imsize[:,0]==1083))
+print(np.where(test_imsize[:,0]==31))
+
+"""Distribute extra image dataset and remove images with more than 5 digits"""
+import PIL.Image as Image
+
+def generate_dataset(data, folder):
+
+    dataset = np.ndarray([len(data),32,32,1], dtype='float32')
+    labels = np.ones([len(data),6], dtype=int) * 10
+    for i in np.arange(len(data)):
+        filename = data[i]['filename']
+        fullname = os.path.join(folder, filename)
+        im = Image.open(fullname)
+        boxes = data[i]['boxes']
+        num_digit = len(boxes)
+        labels[i,0] = num_digit
+        top = np.ndarray([num_digit], dtype='float32')
+        left = np.ndarray([num_digit], dtype='float32')
+        height = np.ndarray([num_digit], dtype='float32')
+        width = np.ndarray([num_digit], dtype='float32')
+        for j in np.arange(num_digit):
+            if j < 5: 
+                labels[i,j+1] = boxes[j]['label']
+                if boxes[j]['label'] == 10: labels[i,j+1] = 0
+            else: print('#',i,'image has more than 5 digits.')
+            top[j] = boxes[j]['top']
+            left[j] = boxes[j]['left']
+            height[j] = boxes[j]['height']
+            width[j] = boxes[j]['width']
+        
+        im_top = np.amin(top)
+        im_left = np.amin(left)
+        im_height = np.amax(top) + height[np.argmax(top)] - im_top
+        im_width = np.amax(left) + width[np.argmax(left)] - im_left
+        
+        im_top = np.floor(im_top - 0.1 * im_height)
+        im_left = np.floor(im_left - 0.1 * im_width)
+        im_bottom = np.amin([np.ceil(im_top + 1.2 * im_height), im.size[1]])
+        im_right = np.amin([np.ceil(im_left + 1.2 * im_width), im.size[0]])
+
+        im = im.crop((im_left, im_top, im_right, im_bottom)).resize([32,32], Image.ANTIALIAS)
+        im = np.dot(np.array(im, dtype='float32'), [[0.2989],[0.5870],[0.1140]])
+        mean = np.mean(im, dtype='float32')
+        std = np.std(im, dtype='float32', ddof=1)
+        if std < 1e-4: std = 1.
+        im = (im - mean) / std
+        dataset[i,:,:,:] = im[:,:,:]
+
+    return dataset, labels
+
+train_dataset, train_labels = generate_dataset(train_data, train_folders)
+print(train_dataset.shape, train_labels.shape)
+
+test_dataset, test_labels = generate_dataset(test_data, test_folders)
+print(test_dataset.shape, test_labels.shape)
+
+train_dataset = np.delete(train_dataset, 29929, axis=0)
+train_labels = np.delete(train_labels, 29929, axis=0)
+
+print(train_dataset.shape, train_labels.shape)
+
+import random
+
+random.seed()
+
+n_labels = 10
+valid_index = []
+valid_index2 = []
+train_index = []
+train_index2 = []
+for i in np.arange(n_labels):
+    valid_index.extend(np.where(train_labels[:,1] == (i))[0][:400].tolist())
+    train_index.extend(np.where(train_labels[:,1] == (i))[0][400:].tolist())
+    valid_index2.extend(np.where(test_labels[:,1] == (i))[0][:200].tolist())
+    train_index2.extend(np.where(test_labels[:,1] == (i))[0][200:].tolist())
+
+random.shuffle(valid_index)
+random.shuffle(train_index)
+random.shuffle(valid_index2)
+random.shuffle(train_index2)
+
+valid_dataset = np.concatenate((test_dataset[valid_index2,:,:,:], train_dataset[valid_index,:,:,:]), axis=0)
+valid_labels = np.concatenate((test_labels[valid_index2,:], train_labels[valid_index,:]), axis=0)
+train_dataset_t = np.concatenate((test_dataset[train_index2,:,:,:], train_dataset[train_index,:,:,:]), axis=0)
+train_labels_t = np.concatenate((test_labels[train_index2,:], train_labels[train_index,:]), axis=0)
+
+print(train_dataset_t.shape, train_labels_t.shape)
+print(test_dataset.shape, test_labels.shape)
+print(valid_dataset.shape, valid_labels.shape)
+
+"""Create a pickle file to store processed data"""
+pickle_file = 'SVHN_multi.pickle'
+
+try:
+  f = open(pickle_file, 'wb')
+  save = {
+    'train_dataset': train_dataset_t,
+    'train_labels': train_labels_t,
+    'valid_dataset': valid_dataset,
+    'valid_labels': valid_labels,
+    'test_dataset': test_dataset,
+    'test_labels': test_labels,
+    }
+  pickle.dump(save, f, pickle.HIGHEST_PROTOCOL)
+  f.close()
+except Exception as e:
+  print('Unable to save data to', pickle_file, ':', e)
+  raise
+    
+statinfo = os.stat(pickle_file)
+print('Compressed pickle size:', statinfo.st_size)
+
+"""Import all modules and load data from pickle file"""
+from __future__ import print_function
+import numpy as np
+import tensorflow as tf
+from six.moves import cPickle as pickle
+from six.moves import range
+
+pickle_file = 'SVHN_multi.pickle'
+
+with open(pickle_file, 'rb') as f:
+  save = pickle.load(f)
+  train_dataset = save['train_dataset']
+  train_labels = save['train_labels']
+  valid_dataset = save['valid_dataset']
+  valid_labels = save['valid_labels']
+  test_dataset = save['test_dataset']
+  test_labels = save['test_labels']
+  del save  
+  print('Training set', train_dataset.shape, train_labels.shape)
+  print('Validation set', valid_dataset.shape, valid_labels.shape)
+  print('Test set', test_dataset.shape, test_labels.shape)
+
+"""Define accuracy function"""
+def accuracy(predictions, labels):
+
+  return (100.0 * np.sum(np.argmax(predictions, 2).T == labels) / predictions.shape[1] / predictions.shape[0])
+
+print("Success")
+
+"""Construct Model"""
+image_size = 32
+num_labels = 11 # 0-9, + blank 
+num_channels = 1 # grayscale
+
+batch_size = 64
+patch_size = 5
+depth1 = 16
+depth2 = 32
+depth3 = 64
+num_hidden1 = 64
+#num_hidden2 = 16
+shape = [batch_size, image_size, image_size, num_channels]
+
+# 7-layer CNN.
+# C1: convolutional layer, batch_size x 28 x 28 x 16, convolution size: 5 x 5 x 1 x 16
+# S2: sub-sampling layer, batch_size x 14 x 14 x 16
+# C3: convolutional layer, batch_size x 10 x 10 x 32, convolution size: 5 x 5 x 16 x 32
+# S4: sub-sampling layer, batch_size x 5 x 5 x 32
+# C5: convolutional layer, batch_size x 1 x 1 x 64, convolution size: 5 x 5 x 32 x 64
+# Dropout
+# F6: fully-connected layer, weight size: 64 x 16
+# Output layer, weight size: 16 x 10
+
+graph = tf.Graph()
+
+with graph.as_default():
+
+  # Input data.
+  tf_train_dataset = tf.placeholder(tf.float32, shape=(batch_size, image_size, image_size, num_channels))
+  tf_train_labels = tf.placeholder(tf.int32, shape=(batch_size, 6))
+  tf_valid_dataset = tf.constant(valid_dataset)
+  tf_test_dataset = tf.constant(test_dataset)
+  
+  # Variables.
+  layer1_weights = tf.get_variable("W1", shape=[patch_size, patch_size, num_channels, depth1],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer1_biases = tf.Variable(tf.constant(1.0, shape=[depth1]), name='B1')
+  layer2_weights = tf.get_variable("W2", shape=[patch_size, patch_size, depth1, depth2],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer2_biases = tf.Variable(tf.constant(1.0, shape=[depth2]), name='B2')
+  layer3_weights = tf.get_variable("W3", shape=[patch_size, patch_size, depth2, num_hidden1],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer3_biases = tf.Variable(tf.constant(1.0, shape=[num_hidden1]), name='B3')
+
+  s1_w = tf.get_variable("WS1", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s1_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS1')
+  s2_w = tf.get_variable("WS2", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s2_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS2')
+  s3_w = tf.get_variable("WS3", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s3_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS3')
+  s4_w = tf.get_variable("WS4", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s4_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS4')
+  s5_w = tf.get_variable("WS5", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s5_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS5')
+  
+  # Model.
+  def model(data, keep_prob, shape):
+    conv = tf.nn.conv2d(data,layer1_weights, [1,1,1,1],padding='VALID', name='C1')
+    hidden = tf.nn.relu(conv + layer1_biases)
+    lrn = tf.nn.local_response_normalization(hidden)
+    sub = tf.nn.max_pool(lrn, [1,2,2,1], [1,2,2,1], 'SAME', name='S2')
+    conv = tf.nn.conv2d(sub, layer2_weights, [1,1,1,1], padding='VALID', name='C3')
+    hidden = tf.nn.relu(conv + layer2_biases)
+    lrn = tf.nn.local_response_normalization(hidden)
+    sub = tf.nn.max_pool(lrn, [1,2,2,1], [1,2,2,1], 'SAME', name='S4')
+    conv = tf.nn.conv2d(sub, layer3_weights, [1,1,1,1], padding='VALID', name='C5')
+    hidden = tf.nn.relu(conv + layer3_biases)
+    hidden = tf.nn.dropout(hidden, keep_prob)
+    shape = hidden.get_shape().as_list()
+    reshape = tf.reshape(hidden, [shape[0], shape[1] * shape[2] * shape[3]])
+
+    logits1 = tf.matmul(reshape, s1_w) + s1_b
+    logits2 = tf.matmul(reshape, s2_w) + s2_b
+    logits3 = tf.matmul(reshape, s3_w) + s3_b
+    logits4 = tf.matmul(reshape, s4_w) + s4_b
+    logits5 = tf.matmul(reshape, s5_w) + s5_b
+    return [logits1, logits2, logits3, logits4, logits5]
+  
+  # Training computation.
+  [logits1, logits2, logits3, logits4, logits5] = model(tf_train_dataset, 0.9375, shape)
+  # Define loss function.
+  loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits = logits1, labels = tf_train_labels[:,1])) +\
+tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits= logits2, labels= tf_train_labels[:,2])) +\
+tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits= logits3, labels= tf_train_labels[:,3])) +\
+tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits= logits4, labels= tf_train_labels[:,4])) +\
+tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits= logits5, labels= tf_train_labels[:,5]))
+    
+  # Optimizer.
+  #optimizer = tf.train.AdagradOptimizer(0.01).minimize(loss) //static learning rate
+  global_step = tf.Variable(0)
+  #learning rate with exponential decay.
+  learning_rate = tf.train.exponential_decay(0.05, global_step, 10000, 0.95) 
+  optimizer = tf.train.AdagradOptimizer(learning_rate).minimize(loss, global_step=global_step)
+  
+   # Predictions for the training, validation, and test data.
+  train_prediction = tf.stack([tf.nn.softmax(model(tf_train_dataset, 1.0, shape)[0]),\
+                      tf.nn.softmax(model(tf_train_dataset, 1.0, shape)[1]),\
+                      tf.nn.softmax(model(tf_train_dataset, 1.0, shape)[2]),\
+                      tf.nn.softmax(model(tf_train_dataset, 1.0, shape)[3]),\
+                      tf.nn.softmax(model(tf_train_dataset, 1.0, shape)[4])])
+  valid_prediction = tf.stack([tf.nn.softmax(model(tf_valid_dataset, 1.0, shape)[0]),\
+                      tf.nn.softmax(model(tf_valid_dataset, 1.0, shape)[1]),\
+                      tf.nn.softmax(model(tf_valid_dataset, 1.0, shape)[2]),\
+                      tf.nn.softmax(model(tf_valid_dataset, 1.0, shape)[3]),\
+                      tf.nn.softmax(model(tf_valid_dataset, 1.0, shape)[4])])
+  test_prediction = tf.stack([tf.nn.softmax(model(tf_test_dataset, 1.0, shape)[0]),\
+                     tf.nn.softmax(model(tf_test_dataset, 1.0, shape)[1]),\
+                     tf.nn.softmax(model(tf_test_dataset, 1.0, shape)[2]),\
+                     tf.nn.softmax(model(tf_test_dataset, 1.0, shape)[3]),\
+                     tf.nn.softmax(model(tf_test_dataset, 1.0, shape)[4])])
+    
+  saver = tf.train.Saver()
+  num_steps = 5000
+  with tf.Session(graph=graph) as session: 
+   tf.global_variables_initializer().run()  
+   print('Initialized')
+   for step in range(num_steps):
+        offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
+        batch_data = train_dataset[offset:(offset + batch_size), :, :, :]
+        batch_labels = train_labels[offset:(offset + batch_size),:]
+        feed_dict = {tf_train_dataset : batch_data, tf_train_labels : batch_labels} 
+        _, l, predictions = session.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
+    
+        if (step % 500 == 0): 
+            print('Minibatch loss at step %d: %f' % (step, l))
+            print('Minibatch accuracy: %.1f%%' % accuracy(predictions, batch_labels[:,1:6]))
+            print('Validation accuracy: %.1f%%' % accuracy(valid_prediction.eval(), valid_labels[:,1:6]))
+
+   print('Test accuracy: %.1f%%' % accuracy(test_prediction.eval(), test_labels[:,1:6]))
+   saver=tf.train.Saver(write_version= tf.train.SaverDef.V2)
+   save_path = saver.save(session, os.path.join(os.getcwd(), "CNN_multi.ckpt"))
+   print('Model saved in file: %s' % save_path)
+
+"""samples from test set"""
+from PIL import Image
+import os
+import sys
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+plt.rcParams['figure.figsize'] = (20.0, 20.0)
+f, ax = plt.subplots(nrows=1, ncols=10)
+
+im_samples = []
+    
+for i, j in enumerate(np.sort(np.random.randint(0, test_labels.shape[0], size=10))):
+    filename = str(j+1)+'.png'
+    fullname = os.path.join('test', filename)
+    im = Image.open(fullname)
+    house_num = ''
+    for k in np.arange(test_labels[j,0]):
+        house_num += str(test_labels[j,k+1])
+    im_samples.extend([j])
+    ax[i].axis('off')
+    ax[i].set_title(house_num, loc='center')
+    ax[i].imshow(im)
+
+"""reload learned model"""
+image_size = 32
+num_labels = 11 # 0-9, + blank 
+num_channels = 1 # grayscale
+
+patch_size = 5
+depth1 = 16
+depth2 = 32
+depth3 = 64
+num_hidden1 = 64
+
+graph = tf.Graph()
+with graph.as_default():
+
+  # Input data.
+  tf_test_dataset = tf.placeholder(tf.float32, shape=(10, 32, 32, 1))
+  
+  # Variables.
+  layer1_weights = tf.get_variable("W1", shape=[patch_size, patch_size, num_channels, depth1],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer1_biases = tf.Variable(tf.constant(1.0, shape=[depth1]), name='B1')
+  layer2_weights = tf.get_variable("W2", shape=[patch_size, patch_size, depth1, depth2],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer2_biases = tf.Variable(tf.constant(1.0, shape=[depth2]), name='B2')
+  layer3_weights = tf.get_variable("W3", shape=[patch_size, patch_size, depth2, num_hidden1],\
+           initializer=tf.contrib.layers.xavier_initializer_conv2d())
+  layer3_biases = tf.Variable(tf.constant(1.0, shape=[num_hidden1]), name='B3')
+
+  s1_w = tf.get_variable("WS1", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s1_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS1')
+  s2_w = tf.get_variable("WS2", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s2_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS2')
+  s3_w = tf.get_variable("WS3", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s3_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS3')
+  s4_w = tf.get_variable("WS4", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s4_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS4')
+  s5_w = tf.get_variable("WS5", shape=[num_hidden1, num_labels],\
+           initializer=tf.contrib.layers.xavier_initializer())
+  s5_b = tf.Variable(tf.constant(1.0, shape=[num_labels]), name='BS5')
+  
+  # Model.
+  def model(data, keep_prob, shape):
+    conv = tf.nn.conv2d(data, layer1_weights, [1,1,1,1], 'VALID', name='C1')
+    hidden = tf.nn.relu(conv + layer1_biases)
+    lrn = tf.nn.local_response_normalization(hidden)
+    sub = tf.nn.max_pool(lrn, [1,2,2,1], [1,2,2,1], 'SAME', name='S2')
+    conv = tf.nn.conv2d(sub, layer2_weights, [1,1,1,1], padding='VALID', name='C3')
+    hidden = tf.nn.relu(conv + layer2_biases)
+    lrn = tf.nn.local_response_normalization(hidden)
+    sub = tf.nn.max_pool(lrn, [1,2,2,1], [1,2,2,1], 'SAME', name='S4')
+    conv = tf.nn.conv2d(sub, layer3_weights, [1,1,1,1], padding='VALID', name='C5')
+    hidden = tf.nn.relu(conv + layer3_biases)
+    hidden = tf.nn.dropout(hidden, keep_prob)
+    shape = hidden.get_shape().as_list()
+    reshape = tf.reshape(hidden, [shape[0], shape[1] * shape[2] * shape[3]])
+    #hidden = tf.nn.relu(tf.matmul(reshape, layer4_weights) + layer4_biases)
+    logits1 = tf.matmul(reshape, s1_w) + s1_b
+    logits2 = tf.matmul(reshape, s2_w) + s2_b
+    logits3 = tf.matmul(reshape, s3_w) + s3_b
+    logits4 = tf.matmul(reshape, s4_w) + s4_b
+    logits5 = tf.matmul(reshape, s5_w) + s5_b
+    return [logits1, logits2, logits3, logits4, logits5]
+  
+  # Training computation.
+  [logits1, logits2, logits3, logits4, logits5] = model(tf_test_dataset, 1, [10, 32, 32, 1])
+
+  predict = tf.stack([tf.nn.softmax(logits1),tf.nn.softmax(logits2),tf.nn.softmax(logits3),\
+                         tf.nn.softmax(logits4),tf.nn.softmax(logits5)])
+  test_prediction = tf.transpose(tf.argmax(predict, 2))
+  saver = tf.train.Saver()
+
+with tf.Session(graph=graph) as session:
+  saver.restore(session, "CNN_multi.ckpt")
+  print("Model restored.")  
+
+  print('Initialized')
+  test_prediction = session.run(test_prediction, feed_dict={tf_test_dataset : test_dataset[im_samples,:,:,:],})
+  print(test_prediction)
+
+"""prediction over selected test samples"""
+plt.rcParams['figure.figsize'] = (15.0, 15.0)
+f, ax = plt.subplots(nrows=1, ncols=10)
+
+
+
+for i, j in enumerate(im_samples):
+    filename = str(j+1)+'.png'
+    fullname = os.path.join('test', filename)
+    im = Image.open(fullname)
+    house_num = ''
+    for k in np.arange(np.sum(test_prediction[i,:] != 10)):
+        house_num += str(test_prediction[i,k])
+
+    ax[i].axis('off')
+    ax[i].set_title(house_num, loc='center')
+    ax[i].imshow(im)
+
+
+Reference:
+1.https://github.com/himanshudongre/SVHN_Capstone_Project
+2.https://github.com/ritchieng/NumNum
+3.https://github.com/PaulHeraty/SVHN
